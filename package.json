@@ -1,0 +1,16 @@
+{
+  "name": "profiling-and-performance",
+  "description": "This is a project, that contains the most typical performance and profiling mistakes.Its purpose to teach how to track down and fix those issues.",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "start": "node index"
+  },
+  "dependencies": {
+    "cookie-parser": "~1.4.4",
+    "debug": "~2.6.9",
+    "express": "~4.16.1",
+    "faker": "^4.1.0",
+    "morgan": "~1.9.1"
+  }
+}
