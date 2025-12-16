@@ -236,3 +236,241 @@ The application serves images in older formats without optimization:
 3. **Expected impact**: 30-40% reduction in total image payload (especially significant on mobile networks).
 
 ---
+
+### Issue #8
+
+**Issue Description:**
+Layout Shift (CLS): Images without explicit dimensions cause Cumulative Layout Shift when they load
+
+**Technical Description:**
+In `public/index.html`, images are rendered without explicit `width` and `height` attributes:
+- Line 33: `<img class="logo" src="images/logo.png" alt="Company logo">` - Only CSS height defined
+- Line 123: `<img class="map" src="images/map.jpg" alt="World map">` - Only CSS max-width defined
+
+When images load without reserved space, the browser doesn't know how much space to allocate. This causes content to shift down as each image loads, resulting in poor CLS scores. The map image (~428KB) is particularly impactful as it shifts all content below it.
+
+**Screenshot/Measurement:**
+- Open Chrome DevTools → Performance tab → Check "Screenshots"
+- Reload the page and observe visual snapshots showing content jumping
+- Use Lighthouse → "Cumulative Layout Shift" metric (Core Web Vital)
+- DevTools → Performance Insights → "Layout Shifts" section shows exact shift occurrences
+
+**Recommendation:**
+Add explicit width and height attributes that match the image's aspect ratio:
+```html
+<!-- Logo with intrinsic dimensions -->
+<img class="logo" src="images/logo.png" alt="Company logo" width="160" height="40">
+
+<!-- Map with intrinsic dimensions (responsive via CSS) -->
+<img class="map" src="images/map.jpg" alt="World map" width="1024" height="512">
+```
+Combined with CSS `max-width: 100%; height: auto;`, this reserves space during load while remaining responsive.
+
+---
+
+### Issue #9
+
+**Issue Description:**
+Render-Blocking Resources: All JavaScript files in `<head>` block HTML parsing and delay First Contentful Paint
+
+**Technical Description:**
+In `public/index.html` (lines 13-22), four JavaScript files are loaded synchronously in the `<head>`:
+- jquery-3.3.1.slim.min.js (~70KB)
+- popper.min.js (~20KB)
+- bootstrap.min.js (~60KB)
+- main.js
+
+None have `async` or `defer` attributes. This means:
+1. HTML parsing stops at each `<script>` tag
+2. Browser downloads and executes each script before continuing
+3. Users see a blank page until all scripts complete
+4. Total blocking time: ~150-300ms on fast connections, much worse on slow networks
+
+**Screenshot/Measurement:**
+- Run Lighthouse audit → "Eliminate render-blocking resources" warning
+- Open DevTools → Network tab → Observe script download timing vs DOMContentLoaded
+- DevTools → Performance tab → Look for long "Parse HTML" gaps while scripts load
+
+**Recommendation:**
+1. Move scripts to end of `<body>` and add `defer` attribute:
+```html
+<script src="https://code.jquery.com/jquery-3.3.1.slim.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/popper.js/1.14.7/umd/popper.min.js" defer></script>
+<script src="https://stackpath.bootstrapcdn.com/bootstrap/4.3.1/js/bootstrap.min.js" defer></script>
+<script src="/javascript/main.js" defer></script>
+```
+2. Or use `async` for independent scripts where execution order doesn't matter
+3. Consider inlining critical JS and lazy-loading non-critical scripts
+
+---
+
+### Issue #10
+
+**Issue Description:**
+Missing Resource Hints: No preconnect or dns-prefetch for external CDN domains, causing connection delays
+
+**Technical Description:**
+The page loads resources from 3 external domains without any resource hints:
+- `code.jquery.com` (jQuery)
+- `cdnjs.cloudflare.com` (normalize.css, popper.js)
+- `stackpath.bootstrapcdn.com` (Bootstrap CSS/JS)
+
+For each new origin, the browser must perform:
+1. DNS lookup (~20-120ms)
+2. TCP connection (~20-100ms)
+3. TLS handshake (~30-100ms on HTTPS)
+
+Without hints, these happen sequentially and late in the page load, adding 150-400ms of latency per domain.
+
+**Screenshot/Measurement:**
+- Open DevTools → Network tab → Enable "Connection" column
+- Observe "DNS Lookup", "Initial Connection", and "SSL" times for external resources
+- Use WebPageTest → Connection View to visualize domain connection timing
+
+**Recommendation:**
+Add resource hints in the `<head>` before loading resources:
+```html
+<head>
+  <!-- DNS prefetch for all external domains -->
+  <link rel="dns-prefetch" href="//code.jquery.com">
+  <link rel="dns-prefetch" href="//cdnjs.cloudflare.com">
+  <link rel="dns-prefetch" href="//stackpath.bootstrapcdn.com">
+  
+  <!-- Preconnect for critical resources (includes DNS + TCP + TLS) -->
+  <link rel="preconnect" href="https://code.jquery.com" crossorigin>
+  <link rel="preconnect" href="https://stackpath.bootstrapcdn.com" crossorigin>
+  
+  <!-- Rest of head content -->
+</head>
+```
+Expected improvement: 100-300ms faster load times for external resources.
+
+---
+
+### Issue #11
+
+**Issue Description:**
+API Over-fetching: Server returns 1000 rows by default but client only uses 100, wasting 90% of transferred data
+
+**Technical Description:**
+In the backend routes:
+- `routes/operations.js` (line 6): `const rows = Number(req.query.rows) || 1000;`
+- `routes/users.js` (line 6): `const rows = Number(req.query.rows) || 1000;`
+
+Both endpoints generate 1000 rows by default. However, the frontend (`public/javascript/main.js`):
+- `appendOperations()` line 54: only iterates over 100 items
+- `appendUsers()` line 105: only iterates over 100 items
+
+This means:
+- 900 unnecessary rows are generated on the server (CPU waste)
+- 900 unnecessary rows are serialized to JSON (memory waste)
+- 900 unnecessary rows are transferred over network (~90KB wasted per request)
+- 900 unnecessary rows are parsed on client (CPU waste)
+
+**Screenshot/Measurement:**
+- Open DevTools → Network tab → Click on `/api/operations` or `/api/users`
+- Check response size: ~100-150KB when only ~10-15KB is needed
+- Preview response JSON and count items (1000 vs needed 100)
+
+**Recommendation:**
+1. Client should request only needed data:
+```javascript
+async function getOperationsData(rowsCount = 100) {
+    let endpoint = `${ENDPOINTS.ROOT}/${ENDPOINTS.OPERATIONS}?rows=${rowsCount}`;
+    const response = await fetch(endpoint);
+    const data = await response.json();
+    return data.operations;
+}
+```
+
+2. Server should have sensible defaults:
+```javascript
+router.get('/', function(req, res, next) {
+  const rows = Math.min(Number(req.query.rows) || 100, 500); // Default 100, max 500
+  // ...
+});
+```
+
+---
+
+### Issue #12
+
+**Issue Description:**
+No HTTP Response Compression: Server doesn't compress API responses, resulting in larger transfer sizes
+
+**Technical Description:**
+The Express server in `app.js` does not use compression middleware. This means:
+- All API responses (JSON) are sent uncompressed
+- HTML, CSS, and JS files from `express.static` are also uncompressed
+- JSON compresses exceptionally well (60-80% reduction typical)
+
+For a 100KB JSON response, compression could reduce it to 20-30KB—significant savings especially on mobile networks.
+
+**Screenshot/Measurement:**
+- Open DevTools → Network tab → Check response headers for any API call
+- Note absence of `Content-Encoding: gzip` or `Content-Encoding: br`
+- Compare "Size" vs "Content" columns (they'll be identical without compression)
+- Use curl: `curl -I -H "Accept-Encoding: gzip" http://localhost:3000/api/operations`
+
+**Recommendation:**
+Install and use the compression middleware:
+```bash
+npm install compression
+```
+
+In `app.js`:
+```javascript
+const compression = require('compression');
+
+const app = express();
+app.use(compression()); // Add before other middleware
+
+app.use(logger('dev'));
+// ... rest of middleware
+```
+
+Expected impact: 60-80% reduction in response sizes for text-based content (JSON, HTML, CSS, JS).
+
+---
+
+### Issue #13
+
+**Issue Description:**
+No Cache Headers on API Responses: API endpoints don't set Cache-Control headers, causing unnecessary repeat requests
+
+**Technical Description:**
+The API routes in `routes/` (deposits.js, dividents.js, gains.js, operations.js, users.js) don't set any caching headers. Every page load makes fresh requests to all endpoints even though:
+- Finance data (deposits, dividents, gains) likely doesn't change frequently
+- The same data could be cached for a short period
+
+Without cache headers, browsers must revalidate or re-fetch on every navigation, increasing server load and slowing perceived performance.
+
+**Screenshot/Measurement:**
+- Open DevTools → Network tab → Reload page
+- Click on any `/api/*` request → Headers tab
+- Note absence of `Cache-Control`, `ETag`, or `Last-Modified` headers
+- Disable cache and reload: observe all requests are re-fetched
+
+**Recommendation:**
+Add appropriate cache headers based on data volatility:
+
+For finance summary data (doesn't change per-request):
+```javascript
+router.get('/', function(req, res, next) {
+  res.set('Cache-Control', 'private, max-age=60'); // Cache for 1 minute
+  // ... existing code
+});
+```
+
+For operations/users data (changes more frequently):
+```javascript
+router.get('/', function(req, res, next) {
+  res.set('Cache-Control', 'private, max-age=30'); // Cache for 30 seconds
+  res.set('Vary', 'Accept-Encoding'); // Vary by encoding for CDN compatibility
+  // ... existing code
+});
+```
+
+For truly static data, consider longer cache durations with `stale-while-revalidate` for better UX.
+
+---
